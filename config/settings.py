@@ -1,43 +1,96 @@
 from pydantic_settings import BaseSettings
-from typing import List, Optional
+from typing import List, Optional, Any
 import os
+from pydantic.functional_validators import BeforeValidator
+from pydantic import Field
+from functools import lru_cache
+
+
+def parse_admin_ids(v: Any) -> List[int]:
+    if v is None:
+        return []
+
+    if isinstance(v, int):
+        return [v]
+
+    if isinstance(v, str):
+        if not v.strip():
+            return []
+        try:
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        except ValueError:
+            return [int(v.strip())]
+
+    if isinstance(v, list):
+        return [int(x) for x in v if str(x).strip()]
+
+    return []
 
 
 class Settings(BaseSettings):
-    # Bot Configuration.
-    BOT_TOKEN: str
-    BOT_USERNAME: str = "RentFromAntonBot"
+    """
+    Application settings loaded from environment variables.
+    """
 
-    # Database Configuration.
-    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/RentFromAnton"
+    BOT_TOKEN: str = Field(..., description="Telegram Bot Token from @BotFather")
+    BOT_USERNAME: str = Field(
+        default=os.getenv("BOT_USERNAME", "RentFromAntonBot"),
+        description="Bot username without @"
+    )
 
-    # Admin Configuration.
-    ADMIN_IDS: List[int] = []
+    DATABASE_URL: str = Field(
+        default="postgresql://postgres:postgres@localhost:5432/RentFromAnton",
+        description="PostgreSQL connection URL"
+    )
 
-    # Redis Configuration.
-    REDIS_URL: Optional[str] = None
+    ADMIN_IDS: List[int] = Field(
+        default_factory=list,
+        description="Comma-separated list of admin user IDs",
+        pre=True
+    )
 
-    # Logging.
-    LOG_LEVEL: str = "INFO"
+    MODERATION_CHAT_ID: int = Field(
+        ...,
+        description="Chat ID for moderation notifications"
+    )
+    MODERATION_NOTIFY_HOURS: int = Field(
+        default=24,
+        description="Hours before notification about unmoderated ad"
+    )
 
-    # Notification Settings.
-    NOTIFICATION_CHECK_INTERVAL: int = 10  # minutes
+    # Rate Limiting
+    RATE_LIMIT_PER_MINUTE: int = Field(
+        default=30,
+        description="Requests per minute limit"
+    )
+    RATE_LIMIT_PER_HOUR: int = Field(
+        default=300,
+        description="Requests per hour limit"
+    )
 
-    # Security.
-    MAX_ADS_PER_USER: int = 10
-    MIN_PRICE: float = 0.0
-    MAX_PRICE: float = 1000000.0
+    DEBUG: bool = Field(
+        default=False,
+        description="Debug mode flag"
+    )
+    LOG_LEVEL: str = Field(
+        default="INFO",
+        description="Logging level"
+    )
 
     class Config:
         env_file = ".env"
+        env_file_encoding = "utf-8"
+        extra = "ignore"
 
-        @classmethod
-        def parse_env_var(cls, field_name: str, raw_val: str):
-            if field_name == "ADMIN_IDS":
-                if raw_val:
-                    return [int(x.strip()) for x in raw_val.split(",")]
-                return []
-            return cls.json_loads(raw_val)
+    @classmethod
+    def validate_admin_ids(cls, v):
+        return parse_admin_ids(v)
 
 
-settings = Settings()
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
+
+
+# Export settings instance
+settings = get_settings()

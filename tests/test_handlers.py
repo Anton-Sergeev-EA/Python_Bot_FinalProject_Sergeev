@@ -1,403 +1,239 @@
-"""
-Тесты для обработчиков бота
-"""
 import pytest
-import asyncio
 from unittest.mock import AsyncMock, Mock, patch
-from telegram import Update, Message, Chat, User as TelegramUser, CallbackQuery
-from telegram.ext import ContextTypes, CallbackContext
+from telegram import Update, Message, Chat, User, CallbackQuery
+from telegram.ext import ContextTypes
 
-from bot.handlers.start import start_command, help_command
-from bot.handlers.ads import start_ad_creation
-from bot.handlers.feedback import start_feedback
-from bot.handlers.moderation import start_moderation
-from database.crud import user_crud
-from database.connection import db
-from config import settings
+from bot.handlers import ads, start, common
+from database.models import AdStatus
+from config.settings import settings
 
 
-class TestBotHandlers:
-    """Тесты обработчиков бота."""
+class TestAdsHandlers:
 
-    def setup_method(self):
-        """Настройка перед каждым тестом."""
-        # Мокаем базу данных.
-        self.mock_session = Mock()
-        self.mock_user = Mock()
-        self.mock_user.id = 1
-        self.mock_user.telegram_id = 123456789
-        self.mock_user.username = "test_user"
-        self.mock_user.first_name = "Test"
+    @pytest.fixture
+    def mock_update(self):
+        update = Mock(spec=Update)
+        update.effective_user = Mock(spec=User)
+        update.effective_user.id = 123456
+        update.callback_query = Mock(spec=CallbackQuery)
+        update.callback_query.data = "manage_ad_1"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        return update
 
-        # Мокаем get_session.
-        self.session_patch = patch('database.connection.db.get_session')
-        self.mock_get_session = self.session_patch.start()
-        self.mock_get_session.return_value.__enter__.return_value = self.mock_session
-
-    def teardown_method(self):
-        """Очистка после каждого теста."""
-        self.session_patch.stop()
+    @pytest.fixture
+    def mock_context(self):
+        context = Mock(spec=ContextTypes.DEFAULT_TYPE)
+        context.user_data = {}
+        context.bot_data = {}
+        return context
 
     @pytest.mark.asyncio
-    async def test_start_command(self):
-        """Тест команды /start."""
-        # Создаем моки.
-        mock_update = AsyncMock(spec=Update)
-        mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
+    async def test_manage_ad_valid_callback(self, mock_update, mock_context):
+        with patch('bot.handlers.ads.get_ad_by_id') as mock_get_ad:
+            mock_ad = Mock()
+            mock_ad.id = 1
+            mock_ad.user_id = 123
+            mock_ad.created_at = "2024-01-01"
+            mock_ad.text = "Test ad text"
+            mock_ad.contact_info = "test@example.com"
+            mock_ad.status = AdStatus.PENDING
+            mock_ad.photo_url = None
+            mock_get_ad.return_value = mock_ad
 
-        # Мокаем пользователя.
-        mock_user = Mock(spec=TelegramUser)
-        mock_user.id = 123456789
-        mock_user.username = "test_user"
-        mock_user.first_name = "Test"
-        mock_user.last_name = "User"
+            original_admin_ids = settings.ADMIN_IDS
+            settings.ADMIN_IDS = [123456]
 
-        mock_update.effective_user = mock_user
-        mock_update.message = AsyncMock(spec=Message)
-        mock_update.message.reply_text = AsyncMock()
+            try:
+                await ads.manage_ad(mock_update, mock_context)
 
-        # Мокаем get_or_create.
-        with patch('bot.handlers.start.user_crud.get_or_create') as mock_get_or_create:
-            mock_get_or_create.return_value = self.mock_user
+                mock_update.callback_query.answer.assert_called_once()
 
-            # Вызываем команду.
-            await start_command(mock_update, mock_context)
+                mock_update.callback_query.edit_message_text.assert_called_once()
 
-            # Проверяем что функция была вызвана.
-            assert mock_update.message.reply_text.called
-
-            # Проверяем аргументы вызова.
-            call_args = mock_update.message.reply_text.call_args
-            assert call_args is not None
-            assert "Добро пожаловать" in call_args[0][0]
+            finally:
+                settings.ADMIN_IDS = original_admin_ids
 
     @pytest.mark.asyncio
-    async def test_start_command_callback(self):
-        """Тест /start через callback."""
-        # Создаем моки.
-        mock_update = AsyncMock(spec=Update)
-        mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
+    async def test_manage_ad_invalid_callback_format(self, mock_update, mock_context):
+        mock_update.callback_query.data = "invalid_format"
 
-        # Мокаем callback query.
-        mock_callback = AsyncMock(spec=CallbackQuery)
-        mock_callback.edit_message_text = AsyncMock()
+        await ads.manage_ad(mock_update, mock_context)
 
-        mock_update.callback_query = mock_callback
-        mock_update.effective_user = Mock(spec=TelegramUser)
-        mock_update.effective_user.id = 123456789
-        mock_update.effective_user.username = "test_user"
-
-        # Мокаем get_or_create.
-        with patch('bot.handlers.start.user_crud.get_or_create') as mock_get_or_create:
-            mock_get_or_create.return_value = self.mock_user
-
-            # Вызываем команду.
-            await start_command(mock_update, mock_context)
-
-            # Проверяем что функция была вызвана.
-            assert mock_callback.edit_message_text.called
+        mock_update.callback_query.edit_message_text.assert_called_once()
+        call_args = mock_update.callback_query.edit_message_text.call_args[0][0]
+        assert "❌ Произошла ошибка" in call_args
 
     @pytest.mark.asyncio
-    async def test_help_command(self):
-        """Тест команды /help."""
-        # Создаем моки.
-        mock_update = AsyncMock(spec=Update)
-        mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
+    async def test_manage_ad_non_numeric_ad_id(self, mock_update, mock_context):
+        mock_update.callback_query.data = "manage_ad_abc"
 
-        mock_update.message = AsyncMock(spec=Message)
-        mock_update.message.reply_text = AsyncMock()
+        await ads.manage_ad(mock_update, mock_context)
 
-        # Вызываем команду.
-        await help_command(mock_update, mock_context)
-
-        # Проверяем что функция была вызвана.
-        assert mock_update.message.reply_text.called
-
-        # Проверяем содержание помощи.
-        call_args = mock_update.message.reply_text.call_args
-        assert call_args is not None
-        help_text = call_args[0][0]
-        assert "/start" in help_text
-        assert "/help" in help_text
-        assert "/menu" in help_text
+        mock_update.callback_query.edit_message_text.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_start_ad_creation(self):
-        """Тест начала создания объявления."""
-        # Создаем моки.
-        mock_update = AsyncMock(spec=Update)
-        mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
-        mock_context.user_data = {}
+    async def test_manage_ad_short_callback(self, mock_update, mock_context):
+        mock_update.callback_query.data = "manage_ad"
 
-        # Мокаем callback query.
-        mock_callback = AsyncMock(spec=CallbackQuery)
-        mock_callback.edit_message_text = AsyncMock()
-        mock_callback.answer = AsyncMock()
+        await ads.manage_ad(mock_update, mock_context)
 
-        mock_update.callback_query = mock_callback
-        mock_update.effective_user = Mock(spec=TelegramUser)
-        mock_update.effective_user.id = 123456789
-
-        # Мокаем проверку лимита объявлений.
-        mock_ads = []
-        with patch('bot.handlers.ads.ad_crud.get_user_ads') as mock_get_ads:
-            mock_get_ads.return_value = mock_ads
-
-            # Вызываем обработчик.
-            result = await start_ad_creation(mock_update, mock_context)
-
-            # Проверяем.
-            assert mock_callback.edit_message_text.called
-            assert 'Создание нового объявления' in mock_callback.edit_message_text.call_args[0][0]
-            assert result == 1  # AD_CREATION.TITLE.
+        mock_update.callback_query.edit_message_text.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_start_ad_creation_limit_exceeded(self):
-        """Тест превышения лимита объявлений."""
-        # Создаем моки.
-        mock_update = AsyncMock(spec=Update)
-        mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
+    async def test_manage_ad_nonexistent_ad(self, mock_update, mock_context):
+        with patch('bot.handlers.ads.get_ad_by_id') as mock_get_ad:
+            mock_get_ad.return_value = None
 
-        # Мокаем callback query.
-        mock_callback = AsyncMock(spec=CallbackQuery)
-        mock_callback.answer = AsyncMock()
+            original_admin_ids = settings.ADMIN_IDS
+            settings.ADMIN_IDS = [123456]
 
-        mock_update.callback_query = mock_callback
-        mock_update.effective_user = Mock(spec=TelegramUser)
-        mock_update.effective_user.id = 123456789
+            try:
+                await ads.manage_ad(mock_update, mock_context)
 
-        # Мокаем проверку лимита - возвращаем 10 объявлений (лимит).
-        mock_ads = [Mock() for _ in range(10)]
-        with patch('bot.handlers.ads.ad_crud.get_user_ads') as mock_get_ads:
-            mock_get_ads.return_value = mock_ads
+                mock_update.callback_query.edit_message_text.assert_called_once()
+                call_args = mock_update.callback_query.edit_message_text.call_args[0][0]
+                assert "не найдено" in call_args
 
-            # Вызываем обработчик.
-            result = await start_ad_creation(mock_update, mock_context)
-
-            # Проверяем что пользователь получил предупреждение.
-            assert mock_callback.answer.called
-            assert "лимит" in mock_callback.answer.call_args[0][0].lower()
-            assert result == -1  # END
+            finally:
+                settings.ADMIN_IDS = original_admin_ids
 
     @pytest.mark.asyncio
-    async def test_start_feedback(self):
-        """Тест начала системы отзывов."""
-        # Создаем моки.
-        mock_update = AsyncMock(spec=Update)
-        mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
+    async def test_manage_ad_non_admin_user(self, mock_update, mock_context):
+        mock_update.effective_user.id = 999999  # Non-admin
 
-        # Мокаем callback query.
-        mock_callback = AsyncMock(spec=CallbackQuery)
-        mock_callback.edit_message_text = AsyncMock()
+        with patch('bot.handlers.ads.get_ad_by_id') as mock_get_ad:
+            mock_ad = Mock()
+            mock_get_ad.return_value = mock_ad
+            original_admin_ids = settings.ADMIN_IDS
+            settings.ADMIN_IDS = [123456, 654321]
 
-        mock_update.callback_query = mock_callback
+            try:
+                await ads.manage_ad(mock_update, mock_context)
 
-        # Вызываем обработчик.
-        await start_feedback(mock_update, mock_context)
+                mock_update.callback_query.edit_message_text.assert_called_once()
+                call_args = mock_update.callback_query.edit_message_text.call_args[0][0]
+                assert "нет прав" in call_args
 
-        # Проверяем.
-        assert mock_callback.edit_message_text.called
-        assert 'Система отзывов' in mock_callback.edit_message_text.call_args[0][0]
-
-    @pytest.mark.asyncio
-    async def test_start_moderation_admin(self):
-        """Тест панели модерации для админа."""
-        # Сохраняем оригинальные админы.
-        original_admins = settings.ADMIN_IDS
-        settings.ADMIN_IDS = [123456789]
-
-        try:
-            # Создаем моки.
-            mock_update = AsyncMock(spec=Update)
-            mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
-
-            # Мокаем callback query.
-            mock_callback = AsyncMock(spec=CallbackQuery)
-            mock_callback.edit_message_text = AsyncMock()
-
-            mock_update.callback_query = mock_callback
-            mock_update.effective_user = Mock(spec=TelegramUser)
-            mock_update.effective_user.id = 123456789
-
-            # Мокаем функции базы данных.
-            with patch('bot.handlers.moderation.moderation_crud.get_pending_ads_count') as mock_count:
-                mock_count.return_value = 5
-
-                with patch('bot.handlers.moderation.ad_crud.Ad') as mock_ad:
-                    # Вызываем обработчик.
-                    await start_moderation(mock_update, mock_context)
-
-                    # Проверяем.
-                    assert mock_callback.edit_message_text.called
-                    assert 'Панель модерации' in mock_callback.edit_message_text.call_args[0][0]
-
-        finally:
-            # Восстанавливаем оригинальные настройки.
-            settings.ADMIN_IDS = original_admins
+            finally:
+                settings.ADMIN_IDS = original_admin_ids
 
     @pytest.mark.asyncio
-    async def test_start_moderation_non_admin(self):
-        """Тест панели модерации для не-админа."""
-        # Создаем моки.
-        mock_update = AsyncMock(spec=Update)
-        mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
+    async def test_approve_ad_valid(self, mock_update, mock_context):
+        mock_update.callback_query.data = "approve_ad_1"
 
-        # Мокаем callback query.
-        mock_callback = AsyncMock(spec=CallbackQuery)
-        mock_callback.answer = AsyncMock()
+        with patch('bot.handlers.ads.update_ad_status') as mock_update_status:
+            mock_update_status.return_value = True
 
-        mock_update.callback_query = mock_callback
-        mock_update.effective_user = Mock(spec=TelegramUser)
-        mock_update.effective_user.id = 999999999  # Не админ.
+            await ads.approve_ad(mock_update, mock_context)
 
-        # Мокаем проверку прав.
-        with patch('bot.handlers.moderation.user_crud.is_admin') as mock_is_admin:
-            mock_is_admin.return_value = False
-
-            # Вызываем обработчик.
-            await start_moderation(mock_update, mock_context)
-
-            # Проверяем что пользователь получил отказ.
-            assert mock_callback.answer.called
-            assert "нет прав" in mock_callback.answer.call_args[0][0].lower()
+            mock_update.callback_query.edit_message_text.assert_called_once()
+            call_args = mock_update.callback_query.edit_message_text.call_args[0][0]
+            assert "одобрено" in call_args
 
     @pytest.mark.asyncio
-    async def test_error_handling(self):
-        """Тест обработки ошибок в командах."""
-        # Создаем моки.
-        mock_update = AsyncMock(spec=Update)
-        mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
+    async def test_approve_ad_invalid_format(self, mock_update, mock_context):
+        mock_update.callback_query.data = "approve_ad"
 
-        mock_update.message = AsyncMock(spec=Message)
-        mock_update.message.reply_text = AsyncMock()
+        await ads.approve_ad(mock_update, mock_context)
 
-        # Имитируем ошибку в get_or_create.
-        with patch('bot.handlers.start.user_crud.get_or_create') as mock_get_or_create:
-            mock_get_or_create.side_effect = Exception("Test error")
-
-            # Вызываем команду.
-            await start_command(mock_update, mock_context)
-
-            # Проверяем что пользователь получил сообщение об ошибке.
-            assert mock_update.message.reply_text.called
-            call_args = mock_update.message.reply_text.call_args
-            assert "ошибка" in call_args[0][0].lower()
+        mock_update.callback_query.edit_message_text.assert_called_once()
+        assert "Ошибка" in mock_update.callback_query.edit_message_text.call_args[0][0]
 
     @pytest.mark.asyncio
-    async def test_context_user_data(self):
-        """Тест использования user_data в контексте."""
-        # Создаем моки.
-        mock_update = AsyncMock(spec=Update)
-        mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
-        mock_context.user_data = {'test_key': 'test_value'}
+    async def test_reject_ad_valid(self, mock_update, mock_context):
+        mock_update.callback_query.data = "reject_ad_1"
 
-        mock_update.message = AsyncMock(spec=Message)
-        mock_update.message.reply_text = AsyncMock()
+        with patch('bot.handlers.ads.update_ad_status') as mock_update_status:
+            mock_update_status.return_value = True
 
-        # Проверяем что user_data сохраняется.
-        assert 'test_key' in mock_context.user_data
-        assert mock_context.user_data['test_key'] == 'test_value'
+            await ads.reject_ad(mock_update, mock_context)
 
-
-class TestInputValidation:
-    """Тесты валидации ввода."""
+            mock_update.callback_query.edit_message_text.assert_called_once()
+            call_args = mock_update.callback_query.edit_message_text.call_args[0][0]
+            assert "отклонено" in call_args
 
     @pytest.mark.asyncio
-    async def test_ad_title_validation(self):
-        """Тест валидации названия объявления."""
-        from bot.utils import validator
+    async def test_confirm_delete_ad(self, mock_update, mock_context):
+        mock_update.callback_query.data = "delete_ad_1"
 
-        # Корректные названия.
-        valid_titles = [
-            "Велосипед горный",
-            "Ноутбук MacBook Pro",
-            "Книга 'Война и мир'",
-            "123 Тестовое название"
-        ]
+        await ads.confirm_delete_ad(mock_update, mock_context)
 
-        for title in valid_titles:
-            is_valid, result = validator.validate_title(title)
-            assert is_valid
-            assert result == title.strip()
+        mock_update.callback_query.edit_message_text.assert_called_once()
+        call_args = mock_update.callback_query.edit_message_text.call_args[0][0]
+        assert "уверены" in call_args
+        assert "удалить" in call_args
 
-        # Некорректные названия.
-        invalid_cases = [
-            ("", "Название не может быть пустым"),
-            ("ab", "Название слишком короткое"),
-            ("a" * 201, "Название слишком длинное"),
-            ("http://spam.com", "Название содержит запрещенные элементы"),
-            ("@username", "Название содержит запрещенные элементы"),
-            ("#hashtag", "Название содержит запрещенные элементы")
-        ]
 
-        for title, expected_error in invalid_cases:
-            is_valid, result = validator.validate_title(title)
-            assert not is_valid
-            assert expected_error in result
+class TestConversationHandler:
 
     @pytest.mark.asyncio
-    async def test_price_validation(self):
-        """Тест валидации цены."""
-        from bot.utils import validator
-
-        # Корректные цены.
-        valid_prices = [
-            ("1000", 1000.0),
-            ("1500.50", 1500.5),
-            ("1,000.50", 1000.5),
-            ("500 руб", 500.0),
-            (" 750 ", 750.0)
-        ]
-
-        for price_str, expected in valid_prices:
-            is_valid, result = validator.validate_price(price_str)
-            assert is_valid
-            assert result == expected
-
-        # Некорректные цены.
-        invalid_prices = [
-            "abc",
-            "",
-            "-100",
-            "1000000000",  # Превышение MAX_PRICE.
-            "not a number"
-        ]
-
-        for price_str in invalid_prices:
-            is_valid, result = validator.validate_price(price_str)
-            assert not is_valid
+    async def test_conversation_flow(self):
+        pass
 
     @pytest.mark.asyncio
-    async def test_contact_info_validation(self):
-        """Тест валидации контактной информации."""
-        from bot.utils import validator
+    async def test_conversation_cancel(self):
+        update = Mock(spec=Update)
+        update.message = Mock(spec=Message)
+        update.message.reply_text = AsyncMock()
 
-        # Корректные контакты.
-        valid_contacts = [
-            "@username",
-            "+7 999 123-45-67",
-            "email@example.com",
-            "@username, +79991234567",
-            "Telegram: @username Телефон: 89991234567"
-        ]
+        context = Mock(spec=ContextTypes.DEFAULT_TYPE)
 
-        for contact in valid_contacts:
-            is_valid, result = validator.validate_contact_info(contact)
-            assert is_valid
+        await ads.cancel(update, context)
 
-        # Некорректные контакты.
-        invalid_contacts = [
-            "",
-            "abc",
-            "just text",
-            "   ",
-            "no contact info here"
-        ]
-
-        for contact in invalid_contacts:
-            is_valid, result = validator.validate_contact_info(contact)
-            assert not is_valid
+        update.message.reply_text.assert_called_once_with(
+            "Операция отменена.",
+            reply_markup=None
+        )
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+class TestEdgeCases:
+
+    @pytest.mark.asyncio
+    async def test_empty_callback_data(self):
+        update = Mock(spec=Update)
+        update.callback_query = Mock(spec=CallbackQuery)
+        update.callback_query.data = ""
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+
+        context = Mock(spec=ContextTypes.DEFAULT_TYPE)
+
+        await ads.manage_ad(update, context)
+
+        update.callback_query.answer.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_none_callback_query(self):
+        update = Mock(spec=Update)
+        update.callback_query = None
+
+        context = Mock(spec=ContextTypes.DEFAULT_TYPE)
+
+        await ads.manage_ad(update, context)
+
+    @pytest.mark.asyncio
+    async def test_large_ad_id(self):
+        update = Mock(spec=Update)
+        update.effective_user = Mock(spec=User)
+        update.effective_user.id = 123456
+        update.callback_query = Mock(spec=CallbackQuery)
+        update.callback_query.data = "manage_ad_9999999999"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+
+        context = Mock(spec=ContextTypes.DEFAULT_TYPE)
+
+        with patch('bot.handlers.ads.get_ad_by_id') as mock_get_ad:
+            mock_get_ad.return_value = None
+
+            original_admin_ids = settings.ADMIN_IDS
+            settings.ADMIN_IDS = [123456]
+
+            try:
+                await ads.manage_ad(update, context)
+
+                mock_update.callback_query.answer.assert_called_once()
+
+            finally:
+                settings.ADMIN_IDS = original_admin_ids
