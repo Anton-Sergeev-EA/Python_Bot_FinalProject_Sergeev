@@ -169,7 +169,153 @@ class TestConversationHandler:
 
     @pytest.mark.asyncio
     async def test_conversation_flow(self):
-        pass
+        """Тестирование полного потока диалога создания объявления."""
+        update = Mock(spec=Update)
+        update.message = Mock(spec=Message)
+        update.message.reply_text = AsyncMock()
+        update.message.text = "Новое объявление"
+        update.message.from_user = Mock(spec=User)
+        update.message.from_user.id = 123456
+
+        context = Mock(spec=ContextTypes.DEFAULT_TYPE)
+        context.user_data = {}
+
+        result = await ads.start_ad_creation(update, context)
+        assert result == 0
+        update.message.reply_text.assert_called_with("📝 Отправьте текст объявления:")
+
+        update.message.text = "Тестовое объявление"
+        update.message.contact = None
+
+        result = await ads.receive_ad_text(update, context)
+        assert result == 1
+        assert context.user_data['ad_text'] == "Тестовое объявление"
+        update.message.reply_text.assert_called_with(
+            "📱 Отправьте контактные данные или нажмите кнопку ниже:",
+            reply_markup=ANY
+        )
+
+        mock_contact = Mock()
+        mock_contact.phone_number = "+79991234567"
+        update.message.contact = mock_contact
+        update.message.text = None
+
+        with patch('bot.handlers.ads.create_ad') as mock_create_ad:
+            mock_create_ad.return_value = Mock(id=1)
+
+            result = await ads.receive_contact(update, context)
+            assert result == -1
+
+            mock_create_ad.assert_called_once_with(
+                user_id=123456,
+                text="Тестовое объявление",
+                contact_info="+79991234567"
+            )
+
+            update.message.reply_text.assert_called_with(
+                "✅ Объявление создано и отправлено на модерацию!"
+            )
+
+    @pytest.mark.asyncio
+    async def test_conversation_flow_with_photo(self):
+        """Тестирование диалога с добавлением фото"""
+        update = Mock(spec=Update)
+        update.message = Mock(spec=Message)
+        update.message.reply_text = AsyncMock()
+        update.message.from_user = Mock(spec=User)
+        update.message.from_user.id = 123456
+
+        context = Mock(spec=ContextTypes.DEFAULT_TYPE)
+        context.user_data = {}
+
+        result = await ads.start_ad_creation(update, context)
+        assert result == 0
+
+        update.message.text = "Объявление с фото"
+        update.message.photo = [Mock(file_id="photo123")]
+
+        result = await ads.receive_ad_text(update, context)
+        assert result == 1
+        assert context.user_data['ad_text'] == "Объявление с фото"
+        assert context.user_data['photo'] == "photo123"
+
+        update.message.text = "test@example.com"
+        update.message.contact = None
+
+        with patch('bot.handlers.ads.create_ad') as mock_create_ad:
+            mock_create_ad.return_value = Mock(id=1)
+
+            result = await ads.receive_contact(update, context)
+            assert result == -1
+            mock_create_ad.assert_called_once_with(
+                user_id=123456,
+                text="Объявление с фото",
+                contact_info="test@example.com",
+                photo_url="photo123"
+            )
+
+    @pytest.mark.asyncio
+    async def test_conversation_cancel_during_flow(self):
+        """Тестирование отмены диалога на разных этапах."""
+        update = Mock(spec=Update)
+        update.message = Mock(spec=Message)
+        update.message.reply_text = AsyncMock()
+        update.message.text = "/cancel"
+
+        context = Mock(spec=ContextTypes.DEFAULT_TYPE)
+        context.user_data = {"ad_text": "черновик"}
+
+        result = await ads.cancel(update, context)
+        assert result == -1
+        assert "ad_text" not in context.user_data
+        update.message.reply_text.assert_called_with(
+            "Операция отменена.",
+            reply_markup=None
+        )
+
+        update.message.reply_text.reset_mock()
+        context.user_data = {"ad_text": "черновик", "photo": "photo123"}
+
+        result = await ads.cancel(update, context)
+        assert result == -1
+        assert context.user_data == {}
+        update.message.reply_text.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_conversation_invalid_input(self):
+        """Тестирование обработки некорректного ввода."""
+        update = Mock(spec=Update)
+        update.message = Mock(spec=Message)
+        update.message.reply_text = AsyncMock()
+        update.message.from_user = Mock(spec=User)
+
+        context = Mock(spec=ContextTypes.DEFAULT_TYPE)
+        context.user_data = {}
+
+        update.message.text = ""
+        result = await ads.receive_ad_text(update, context)
+        assert result == 0
+        update.message.reply_text.assert_called_with(
+            "❌ Текст не может быть пустым. Попробуйте снова:"
+        )
+
+        update.message.text = "a" * 5000
+        update.message.reply_text.reset_mock()
+
+        result = await ads.receive_ad_text(update, context)
+        assert result == 0
+        update.message.reply_text.assert_called_with(
+            "❌ Текст слишком длинный. Максимум 4096 символов. Попробуйте снова:"
+        )
+
+        update.message.text = ""
+        update.message.contact = None
+
+        result = await ads.receive_contact(update, context)
+        assert result == 1
+        update.message.reply_text.assert_called_with(
+            "❌ Контактные данные не могут быть пустыми. Попробуйте снова:"
+        )
 
     @pytest.mark.asyncio
     async def test_conversation_cancel(self):

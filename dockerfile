@@ -32,4 +32,4 @@ USER botuser
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD python -c "import sys; sys.exit(0)"
 
-CMD ["python", "-m", "bot.main"]
+CMD ["python", "main.py"]

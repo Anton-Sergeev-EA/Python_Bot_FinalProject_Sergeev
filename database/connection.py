@@ -1,10 +1,10 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.exc import SQLAlchemyError
-from contextlib import contextmanager
 import logging
-from typing import Generator
-from config import settings
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.pool import QueuePool
+
+from config.settings import settings
+from database.models import Base
 
 logger = logging.getLogger(__name__)
 
@@ -13,53 +13,41 @@ class Database:
     def __init__(self):
         self.engine = None
         self.SessionLocal = None
-        self.connect()
+        self._init_engine()
 
-    def connect(self):
-        """Create database connection."""
+    def _init_engine(self):
         try:
             self.engine = create_engine(
                 settings.DATABASE_URL,
-                pool_pre_ping=True,  # Check connection before using.
-                pool_recycle=3600,  # Recycle connections after 1 hour.
-                pool_size=10,
-                max_overflow=20,
-                echo=False  # Set to True for SQL logging.
+                echo=settings.DB_ECHO,
+                poolclass=QueuePool,
+                pool_size=settings.DB_POOL_SIZE,
+                max_overflow=settings.DB_MAX_OVERFLOW,
+                pool_pre_ping=True,
             )
-            self.SessionLocal = sessionmaker(
-                autocommit=False,
-                autoflush=False,
-                bind=self.engine
+            self.SessionLocal = scoped_session(
+                sessionmaker(
+                    autocommit=False,
+                    autoflush=False,
+                    bind=self.engine
+                )
             )
-            logger.info("Database connection established")
+            logger.info("Database engine initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to connect to database: {e}")
+            logger.error(f"Failed to initialize database engine: {e}")
             raise
 
-    @contextmanager
-    def get_session(self) -> Generator[Session, None, None]:
-        """Get database session with context manager."""
-        session = self.SessionLocal()
-        try:
-            yield session
-            session.commit()
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Database session error: {e}")
-            raise
-        finally:
+    def get_session(self):
+        return self.SessionLocal()
+
+    def close_session(self, session):
+        if session:
             session.close()
 
-    def create_tables(self):
-        """Create all tables in database."""
-        try:
-            from .models import Base
-            Base.metadata.create_all(bind=self.engine)
-            logger.info("Database tables created successfully")
-        except Exception as e:
-            logger.error(f"Failed to create tables: {e}")
-            raise
+    def dispose_engine(self):
+        if self.engine:
+            self.engine.dispose()
+            logger.info("Database engine disposed")
 
 
-# Global database instance.
 db = Database()

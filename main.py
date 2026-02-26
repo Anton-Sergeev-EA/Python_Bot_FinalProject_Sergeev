@@ -3,17 +3,14 @@ import logging
 import sys
 from pathlib import Path
 
-# Add project root to path.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from telegram.ext import Application, ApplicationBuilder, Defaults
+from telegram.ext import Application, ApplicationBuilder, Defaults, ContextTypes
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
 
-# Load environment variables.
 load_dotenv()
 
-# Import handlers.
 from bot.handlers.start import register_handlers as register_start_handlers
 from bot.handlers.ads import register_handlers as register_ad_handlers
 from bot.handlers.search import register_handlers as register_search_handlers
@@ -21,14 +18,11 @@ from bot.handlers.moderation import register_handlers as register_moderation_han
 from bot.handlers.feedback import register_handlers as register_feedback_handlers
 from bot.handlers.notifications import register_handlers as register_notification_handlers
 
-# Import scheduler.
 from scheduler.jobs import setup_scheduler
 
-# Import database.
 from database.connection import db
 from config import settings
 
-# Configure logging.
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=getattr(logging, settings.LOG_LEVEL.upper()),
@@ -42,18 +36,17 @@ logger = logging.getLogger(__name__)
 
 
 async def post_init(application: Application):
-    """Post initialization tasks"""
     logger.info("Bot initialization completed")
 
-    # Create database tables if they don't exist.
+    # Проверяю подключение к базе данных (без создания таблиц).
     try:
-        db.create_tables()
-        logger.info("Database tables checked/created")
+        with db.get_session() as session:
+            session.execute("SELECT 1")
+        logger.info("Database connection successful")
     except Exception as e:
-        logger.error(f"Failed to create database tables: {e}")
+        logger.error(f"Failed to connect to database: {e}")
         raise
 
-    # Setup scheduler.
     try:
         setup_scheduler(application.bot)
         logger.info("Scheduler setup completed")
@@ -62,21 +55,19 @@ async def post_init(application: Application):
 
 
 async def post_shutdown(application: Application):
-    """Post shutdown tasks"""
     logger.info("Bot shutdown completed")
 
-    # Stop scheduler if exists.
     from scheduler.jobs import scheduler
     if scheduler:
         scheduler.stop()
 
+    db.dispose_engine()
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Global error handler."""
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
     try:
-        # Notify user about error.
         if update and hasattr(update, 'effective_user'):
             try:
                 await context.bot.send_message(
@@ -87,7 +78,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
 
-        # Notify admin about critical errors.
         if isinstance(context.error, Exception) and str(context.error).lower().find("critical") != -1:
             for admin_id in settings.ADMIN_IDS:
                 try:
@@ -103,7 +93,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def main():
-    """Main function to run the bot."""
     logger.info("Starting Rent from Anton bot...")
 
     # Validate required settings
@@ -111,7 +100,6 @@ async def main():
         logger.error("BOT_TOKEN not found in environment variables")
         sys.exit(1)
 
-    # Create bot application with persistence.
     defaults = Defaults(
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True,
@@ -128,10 +116,8 @@ async def main():
         .build()
     )
 
-    # Add error handler.
     application.add_error_handler(error_handler)
 
-    # Register handlers.
     logger.info("Registering handlers...")
     register_start_handlers(application)
     register_ad_handlers(application)
@@ -140,29 +126,23 @@ async def main():
     register_feedback_handlers(application)
     register_notification_handlers(application)
 
-    # Log registered handlers.
     logger.info(f"Registered {len(application.handlers)} handler groups")
 
-    # Start the bot.
     logger.info("Bot is starting...")
 
     try:
-        # Run bot until stopped.
         await application.initialize()
         await application.start()
 
-        # Get bot info.
         bot = await application.bot.get_me()
         logger.info(f"Bot @{bot.username} is running!")
         logger.info(f"Bot ID: {bot.id}")
         logger.info(f"Bot name: {bot.first_name}")
 
-        # Run forever.
         await application.updater.start_polling(
             drop_pending_updates=True
         )
 
-        # Keep the application running.
         await asyncio.Event().wait()
 
     except KeyboardInterrupt:
@@ -178,5 +158,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    # Run the bot.
     asyncio.run(main())

@@ -76,10 +76,3 @@ Thumbs.db
 # Logs
 bot.log
 *.log
-
-# Project specific
-alembic.ini
-Dockerfile
-README.md
-docker-compose.yml
-tests/
